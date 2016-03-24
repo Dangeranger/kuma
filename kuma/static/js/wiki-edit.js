@@ -186,6 +186,7 @@
   */
     var DRAFT_NAME;
     var DRAFT_TIMEOUT_ID;
+    var draftingEnabled = false;
 
     var supportsLocalStorage = win.mdn.features.localStorage;
     var $form = $('#wiki-page-edit');
@@ -397,22 +398,32 @@
 
     // Injects a DIV with language to the effect of "you had a previous draft, want to restore it?"
     // This takes the place of an ugly, ugly confirmation box :(
-    var $draftDiv;
-    function displayDraftBox(content, draft_time) {
+
+    var $draftDiv = $('<div/>', { class: 'draft-container' });
+    var $draftButton = $('<button/>', { class: 'button neutral', text: gettext('Save Draft'), 'type': 'button', 'disabled': 'disabled'})
+                     .append($('<i/>', { class: 'icon-save', 'aria-hidden': 'true'}));
+    var $draftStatus = $('<span/>', { class: 'draft-status' });
+    var $draftAction = $('<span/>', {id: 'draft-action'});
+    var $draftTime = $('<time/>', {id: 'draft-time', class: 'time-ago'});
+
+    // show restore and discard links for old draft
+    function displayRestoreDraft(content, draft_time) {
         var draft_time_str = draft_time ? draft_time : gettext('an unknown date');
         var draft = gettext('You have a draft from:');
         var restore = gettext('Restore the draft content');
         var discard = gettext('Discard the draft');
 
-        var text = draft + ' ' + draft_time_str + '. <a href="" class="restoreLink">' + restore + '</a>. <a href="" class="discardLink">'+ discard +'</a>.';
+        var text = draft + ' ' + draft_time_str + '. <a href="" class="js-restoreLink">' + restore + '</a>. <a href="" class="js-discardLink">'+ discard +'</a>.';
         var $contentNode = $('#id_content');
         var editor;
 
-        // Plan the draft into the page
-        $draftDiv = $('<div class="notice"><p>' + text + '</p></div>').insertBefore($contentNode);
+        // Place the recovered draft into the page
+        $draftStatus.empty();
+        $draftButton.hide();
+        $draftStatus.append(text);
 
         // Hook up the "restore" link
-        $draftDiv.find('.restoreLink').on('click', function(e) {
+        $draftDiv.find('.js-restoreLink').on('click', function(e) {
             e.preventDefault();
             $contentNode.val(content);
 
@@ -425,20 +436,14 @@
                 editor.setData(content);
             }
             editor.focus();
-
-            updateDraftState('loaded');
-            hideDraftBox();
+            updateDraftState(gettext('restored'));
         });
 
         // Hook up the "dispose" link
-        $draftDiv.find('.discardLink').on('click', function(e) {
+        $draftDiv.find('.js-discardLink').on('click', function(e) {
             e.preventDefault();
-            hideDraftBox();
-            clearDraft();
+            clearDraft(true);
         });
-    }
-    function hideDraftBox() {
-        $draftDiv && $draftDiv.css('display', 'none');
     }
 
 
@@ -448,11 +453,11 @@
     function initSaveAndEditButtons () {
         // Save button submits to top-level
         $('.btn-save').on('click', function () {
-            if (supportsLocalStorage) {
+            if (draftingEnabled) {
                 // Clear any preserved content.
-                clearDraft();
+                clearDraft(false);
+                clearTimeout(DRAFT_TIMEOUT_ID);
             }
-            clearTimeout(DRAFT_TIMEOUT_ID);
             $form.attr('action', '').removeAttr('target');
             return true;
         });
@@ -466,17 +471,17 @@
             mdn.analytics.trackEvent({
                 category: 'Wiki',
                 action: 'Button',
-                label: 'Save and Keep Editing'
+                label: 'Save and Keep Editing' // now "Publish and keep editing" but keeping label for analytics continuity
             });
 
             var savedTa = $form.find('textarea[name=content]').val();
-            if (supportsLocalStorage) {
+            if (draftingEnabled) {
                 // Preserve editor content, because saving to the iframe can
                 // yield things like 403 / login-required errors that bust out
                 // of the frame
                 saveDraft(savedTa);
+                clearTimeout(DRAFT_TIMEOUT_ID);
             }
-            clearTimeout(DRAFT_TIMEOUT_ID);
             // Redirect the editor form to the iframe.
             $form.attr('action', '?iframe=1').attr('target', 'save-and-edit-target');
             return true;
@@ -487,36 +492,36 @@
             if(notifications[0]) notifications[0].success(null, 2000);
             notifications.shift();
 
-            if (supportsLocalStorage) {
-                var if_doc = $(this).get(0).contentDocument;
-                if (typeof(if_doc) != 'undefined') {
+            var if_doc = $(this).get(0).contentDocument;
+            if (typeof(if_doc) != 'undefined') {
 
-                    var ir = $('#iframe-response', if_doc);
-                    if ('OK' == ir.attr('data-status')) {
+                var ir = $('#iframe-response', if_doc);
+                if ('OK' == ir.attr('data-status')) {
 
+                    if (draftingEnabled) {
                         // Dig into the iframe on load and look for "OK". If found,
                         // then it should be safe to throw away the preserved content.
                         localStorage.removeItem(DRAFT_NAME);
-
-                        // We also need to update the form's current_rev to
-                        // avoid triggering a conflict, since we just saved in
-                        // the background.
-                        $form.find('input[name=current_rev]').val(
-                            ir.attr('data-current-revision'));
-
-                    } else if ($form.add(if_doc).hasClass('conflict')) {
-                        // HACK: If we detect a conflict in the iframe while
-                        // doing save-and-edit, force a full-on save in order
-                        // to surface the issue. There's no easy way to bust
-                        // the iframe otherwise, since this was a POST.
-                        $form.attr('action', '').attr('target', '');
-                        $('.btn-save').click();
-
                     }
 
-                    // Anything else that happens (eg. 403 errors) should have
-                    // framebusting code to escape the hidden iframe.
+                    // We also need to update the form's current_rev to
+                    // avoid triggering a conflict, since we just saved in
+                    // the background.
+                    $form.find('input[name=current_rev]').val(
+                        ir.attr('data-current-revision'));
+
+                } else if ($form.add(if_doc).hasClass('conflict')) {
+                    // HACK: If we detect a conflict in the iframe while
+                    // doing save-and-edit, force a full-on save in order
+                    // to surface the issue. There's no easy way to bust
+                    // the iframe otherwise, since this was a POST.
+                    $form.attr('action', '').attr('target', '');
+                    $('.btn-save').click();
+
                 }
+
+                // Anything else that happens (eg. 403 errors) should have
+                // framebusting code to escape the hidden iframe.
             }
             // Stop loading state on button
             $('.btn-save-and-edit').removeClass('loading');
@@ -541,33 +546,59 @@
     }
 
     function updateDraftState(action) {
+        $draftButton.show();
         var now = new Date();
         var nowString = now.toLocaleDateString() + ' ' + now.toLocaleTimeString();
 
-        $('#draft-action').text(action);
-        $('#draft-time').attr('title', now.toISOString()).text(nowString);
+        $draftStatus.empty();
+        var $updateAction = $draftAction.clone().text(action);
+        var $updateTime = $draftTime.clone().attr('title', now.toISOString()).text(nowString);
+        $draftStatus.append(gettext('draft') + ' ').append($updateAction).append(' ').append($updateTime);
     }
 
     function saveDraft(val) {
-        if (supportsLocalStorage) {
-            localStorage.setItem(DRAFT_NAME, val || $form.find('textarea[name=content]').val());
-            var now = new Date();
-            var nowString = now.toLocaleDateString() + ' ' + now.toLocaleTimeString();
-            localStorage.setItem(DRAFT_NAME + '#save-time', nowString);
-            updateDraftState(gettext('saved'));
-        }
+        var draftContent = val || $form.find('textarea[name=content]').val();
+        localStorage.setItem(DRAFT_NAME, draftContent);
+        var now = new Date();
+        var nowString = now.toLocaleDateString() + ' ' + now.toLocaleTimeString();
+        localStorage.setItem(DRAFT_NAME + '#save-time', nowString);
+        updateDraftState(gettext('saved'));
+        $draftButton.attr('disabled', 'disabled');
     }
 
-    function clearDraft() {
-        if (supportsLocalStorage) {
-           localStorage.removeItem(DRAFT_NAME);
+    function clearDraft(notify) {
+        localStorage.removeItem(DRAFT_NAME);
+        localStorage.removeItem(DRAFT_NAME + '#save-time');
+        if (notify) {
+            updateDraftState(gettext('discarded'));
         }
     }
 
     function initDrafting() {
         var editor;
-        DRAFT_NAME = getStorageKey();
         if (supportsLocalStorage) {
+            draftingEnabled = true;
+            DRAFT_NAME = getStorageKey();
+            // add listeners
+            $draftButton.on('click', function() {
+                // can't just pass function because it's passing click event as first parameter.
+                saveDraft();
+            });
+
+            // insert draft div with button
+            $draftDiv.append($draftButton);
+            $draftDiv.append(' ');
+            $draftDiv.append($draftStatus);
+            $('#editor-wrapper').prepend($draftDiv);
+
+            // if there was an error publishing
+            // let the user save without making edits
+            var isErrors = $('.errorlist').length;
+            if (isErrors) {
+                $draftButton.removeAttr('disabled');
+            }
+
+            // check for previous drafts, add recovery options
             var prev_draft = localStorage.getItem(DRAFT_NAME),
                 treatDraft = function(content) {
                     return (content || '').replace(/ /g, '&nbsp;');
@@ -577,38 +608,46 @@
                 treatedServer = treatDraft($form.find('textarea[name=content]').val().trim());
             if (prev_draft) {
                 // draft matches server so discard draft
-                if (treatedDraft == treatedServer) {
-                    clearDraft();
+                // unless there were errors because server returns draft content
+                if (treatedDraft == treatedServer && !isErrors) {
+                    clearDraft(false);
                 } else {
                     var draft_time = localStorage.getItem(DRAFT_NAME + '#save-time');
-                    displayDraftBox(prev_draft, draft_time);
+                    displayRestoreDraft(prev_draft, draft_time);
                 }
             }
-        }
 
-        // Add key listener for CKEditor and drafting
-        var callback = function() {
-            clearTimeout(DRAFT_TIMEOUT_ID);
-            DRAFT_TIMEOUT_ID = setTimeout(saveDraft, 3000);
-        };
-        if(isTemplate) {
-            ace_editor.on && ace_editor.on('change', callback);
-        }
-        else {
-            try {
-                var $content = $('#id_content');
-                $content.ckeditorGet && $content.ckeditorGet().on('key', callback);
-            }
-            catch(e) {
-                console.log(e);
-            }
-        }
 
-        // Clear draft upon discard
-       $('.btn-discard').on('click', function() {
-            clearTimeout(DRAFT_TIMEOUT_ID);
-           clearDraft();
-       });
+
+
+            // Add key listener for CKEditor and drafting
+            var callback = function() {
+                // don't save if still typing
+                clearTimeout(DRAFT_TIMEOUT_ID);
+                // begin countdown to auto save
+                DRAFT_TIMEOUT_ID = setTimeout(saveDraft, 3000);
+                // unsaved changes, enable button
+                $draftButton.removeAttr('disabled');
+            };
+            if(isTemplate) {
+                ace_editor.on && ace_editor.on('change', callback);
+            }
+            else {
+                try {
+                    var $content = $('#id_content');
+                    $content.ckeditorGet && $content.ckeditorGet().on('key', callback);
+                }
+                catch(e) {
+                    console.log(e);
+                }
+            }
+
+            // Clear draft upon discard
+           $('.btn-discard').on('click', function() {
+                clearTimeout(DRAFT_TIMEOUT_ID);
+                clearDraft(true);
+           });
+        }
     }
 
     function initAttachmentsActions() {
